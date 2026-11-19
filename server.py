@@ -152,8 +152,8 @@ def _fetch_media_with_retry(target, referer, cookie, range_hdr):
     strategies = [
         ("chrome131", "v2",  {}, "chrome131/v2"),
         ("chrome120", "v2",  {}, "chrome120/v2"),
-        ("chrome131", "v1", {}, "chrome131/v1.1"),
-        ("chrome124", "v1", {}, "chrome124/v1.1"),
+        ("chrome131", "v1", {}, "chrome131/v1"),
+        ("chrome124", "v1", {}, "chrome124/v1"),
         ("chrome120", "v2",  ({"Range": "bytes=0-"} if not range_hdr else {}),
                               "chrome120/v2+range"),
         ("safari17_0", "v2", {}, "safari17/v2"),
