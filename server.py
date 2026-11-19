@@ -11,6 +11,9 @@ Key fixes:
   3. `direct=1` query param — returns a 302 to the CDN so the user's browser
      fetches it directly (real IP + real TLS = usually not blocked).
   4. /favicon.ico returns 204 instead of 400.
+  5. NEW: Optional residential proxy for media requests, read from env var
+     RESIDENTIAL_PROXY (format: http://user:pass@host:port). API calls stay
+     direct so we don't waste proxy traffic on them.
 """
 
 import importlib
@@ -26,6 +29,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, urljoin, quote
 
 from curl_cffi import requests as creq
+
+# ---------------------------------------------------------------- proxy config
+# Set RESIDENTIAL_PROXY in Railway env vars, e.g.
+#   http://user:pass@gate.proxyhat.com:8080
+# Leave unset/empty to disable proxying (media requests go direct).
+PROXY_URL = os.environ.get("RESIDENTIAL_PROXY", "").strip()
+
+def _proxy_kwargs():
+    """Return kwargs dict for creq.get() with proxy set, or empty if disabled."""
+    if not PROXY_URL:
+        return {}
+    return {"proxies": {"http": PROXY_URL, "https": PROXY_URL}}
 
 # ---------------------------------------------------------------- keepalive
 KEEPALIVE_INTERVAL = 4 * 60
@@ -148,18 +163,20 @@ def _fetch_media_with_retry(target, referer, cookie, range_hdr):
     """
     Try multiple fingerprint/header/HTTP-version combos until we get real video.
     Returns (response, strategy_label) on success, (None, error_msg) on failure.
+    Routes through RESIDENTIAL_PROXY if set.
     """
     strategies = [
         ("chrome131", "v2",  {}, "chrome131/v2"),
         ("chrome120", "v2",  {}, "chrome120/v2"),
-        ("chrome131", "v1", {}, "chrome131/v1"),
-        ("chrome124", "v1", {}, "chrome124/v1"),
+        ("chrome131", "v1",  {}, "chrome131/v1"),
+        ("chrome124", "v1",  {}, "chrome124/v1"),
         ("chrome120", "v2",  ({"Range": "bytes=0-"} if not range_hdr else {}),
                               "chrome120/v2+range"),
         ("safari17_0", "v2", {}, "safari17/v2"),
         ("firefox133", "v2", {}, "firefox133/v2"),
     ]
 
+    proxy_label = "via-proxy" if PROXY_URL else "direct"
     last_error = None
     for imp, hv, extra, label in strategies:
         try:
@@ -167,18 +184,19 @@ def _fetch_media_with_retry(target, referer, cookie, range_hdr):
             hdrs.update(extra)
             r = creq.get(target, headers=hdrs, impersonate=imp, verify=False,
                          timeout=(15, 120), allow_redirects=True,
-                         stream=True, http_version=hv)
+                         stream=True, http_version=hv,
+                         **_proxy_kwargs())
             if _is_good_media_response(r):
-                print(f"[proxy] CDN OK via {label} for {target[:70]}", flush=True)
+                print(f"[proxy] CDN OK via {label} ({proxy_label}) for {target[:70]}", flush=True)
                 return r, label
             ct = (r.headers.get("Content-Type") or "")[:40]
             st = r.status_code
-            print(f"[proxy] CDN retry {label}: status={st} ct={ct!r}", flush=True)
+            print(f"[proxy] CDN retry {label} ({proxy_label}): status={st} ct={ct!r}", flush=True)
             try: r.close()
             except Exception: pass
         except Exception as e:
             last_error = e
-            print(f"[proxy] CDN exception {label}: {e}", flush=True)
+            print(f"[proxy] CDN exception {label} ({proxy_label}): {e}", flush=True)
             continue
 
     return None, f"all strategies failed (last_error={last_error})"
@@ -449,7 +467,7 @@ class Handler(BaseHTTPRequestHandler):
         is_media = _guess_content_type_from_path(target) is not None
         rng = self.headers.get("Range")
 
-        # ═══ Media requests: multi-strategy retry ═══
+        # ═══ Media requests: multi-strategy retry (with residential proxy) ═══
         if is_media:
             r, strategy = _fetch_media_with_retry(target, referer, cookie_param, rng)
             if r is None:
@@ -460,10 +478,11 @@ class Handler(BaseHTTPRequestHandler):
                     "host": host,
                     "referer_sent": referer,
                     "detail": strategy,
+                    "proxy_enabled": bool(PROXY_URL),
                     "hint": "Append &direct=1 to this URL to force a 302 redirect.",
                 }), "application/json", head_only)
         else:
-            # ═══ API requests: existing single-attempt with v1.1 fallback ═══
+            # ═══ API requests: direct (no proxy), existing v1.1 fallback ═══
             if is_api:
                 hdrs = {
                     "Accept": "application/json",
@@ -498,7 +517,7 @@ class Handler(BaseHTTPRequestHandler):
                     print(f"[proxy] retrying with HTTP/1.1...", flush=True)
                     r = creq.get(target, headers=hdrs, impersonate="chrome120",
                                  verify=False, timeout=(15, 120), allow_redirects=True,
-                                 stream=True, http_version="v1.1")
+                                 stream=True, http_version="v1")
                 except Exception as e2:
                     return self._send_body(502, json.dumps({"error": str(e2), "target": target}),
                                            "application/json", head_only)
@@ -629,10 +648,11 @@ if __name__ == "__main__":
     on_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID"))
 
     banner = f"""
-✓ MovieBox proxy + provider aggregator (HTTP/2 + CDN retry)
+✓ MovieBox proxy + provider aggregator (HTTP/2 + CDN retry + proxy)
   PORT={port}
   Providers loaded: {len(PROVIDERS)}
   Plugins loaded:   {len(_PLUGINS)} ({', '.join(sorted(_PLUGINS)) or 'none'})
+  Residential proxy: {'ENABLED' if PROXY_URL else 'disabled'}
   Serving HTML from: {BASE_DIR}
     - index.html     {"[OK]" if index_ok else "[MISSING]"}
     - player.html    {"[OK]" if player_ok else "[MISSING]"}
