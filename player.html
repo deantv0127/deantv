@@ -3092,7 +3092,7 @@ if (!P.streamUrl && (!P.detailPath || !P.subjectId)) {
   font-size:18px; font-weight:700; cursor:pointer;
   z-index:9998; box-shadow:0 4px 16px rgba(0,0,0,.6);
 ">🐞</button>
-  <script>
+<script>
 (function(){
   "use strict";
   const logEl = document.getElementById("devLog");
@@ -3127,16 +3127,20 @@ if (!P.streamUrl && (!P.detailPath || !P.subjectId)) {
     navigator.clipboard.writeText(text).then(()=>append("ok","Log copied"),()=>append("err","Copy failed"));
   });
 
+  // ── capture console.* ──
   const orig = { log:console.log, warn:console.warn, error:console.error, info:console.info };
   console.log   = function(...a){ orig.log.apply(console,a);   append("info",a.join(" ")); };
   console.info  = function(...a){ orig.info.apply(console,a);  append("info",a.join(" ")); };
   console.warn  = function(...a){ orig.warn.apply(console,a);  append("warn",a.join(" ")); };
   console.error = function(...a){ orig.error.apply(console,a); append("err", a.join(" ")); };
 
+  // ── capture window errors ──
   window.addEventListener("error", e=>append("err","JS error: "+(e.message||"?")+(e.filename?" @ "+e.filename.split("/").pop()+":"+e.lineno:"")));
   window.addEventListener("unhandledrejection", e=>append("err","Unhandled rejection: "+(e.reason?.message||e.reason||"?")));
 
+  // ── capture fetch (with diagnostics) ──
   const origFetch = window.fetch;
+  append("info","[devlog] wrapping fetch, current=" + typeof origFetch);
   window.fetch = function(input, init){
     const url = typeof input==="string"?input:(input?.url||String(input));
     const short = url.length>140?url.slice(0,140)+"…":url;
@@ -3150,12 +3154,55 @@ if (!P.streamUrl && (!P.detailPath || !P.subjectId)) {
     }).catch(err=>{ append("err","✗ fetch failed: "+(err?.message||err)+" — "+short); throw err; });
   };
 
+  // ── hook startPlayback / fetchStreams if present ──
+  // (wait for them to be defined, then wrap)
+  function tryWrapFns(){
+    if (typeof window.fetchStreams === "function" && !window.fetchStreams._wrapped){
+      const origFS = window.fetchStreams;
+      window.fetchStreams = async function(signal){
+        append("info","[fetchStreams] start subjectId=" + (window.P?.subjectId || "?") + " detailPath=" + (window.P?.detailPath || "?"));
+        try {
+          const r = await origFS.call(this, signal);
+          append("ok","[fetchStreams] ok streams=" + (r?.streams?.length || 0) + " signCookie=" + (r?.signCookie ? "yes" : "no"));
+          return r;
+        } catch (e) {
+          append("err","[fetchStreams] threw: " + (e?.name || "") + " " + (e?.message || e));
+          throw e;
+        }
+      };
+      window.fetchStreams._wrapped = true;
+      append("ok","[devlog] wrapped fetchStreams");
+    }
+    if (typeof window.startPlayback === "function" && !window.startPlayback._wrapped){
+      const origSP = window.startPlayback;
+      window.startPlayback = async function(opts){
+        append("info","[startPlayback] called opts=" + JSON.stringify(opts || {}));
+        try {
+          const r = await origSP.call(this, opts);
+          append("ok","[startPlayback] returned");
+          return r;
+        } catch (e) {
+          append("err","[startPlayback] threw: " + (e?.name || "") + " " + (e?.message || e));
+          throw e;
+        }
+      };
+      window.startPlayback._wrapped = true;
+      append("ok","[devlog] wrapped startPlayback");
+    }
+  }
+  setTimeout(tryWrapFns, 0);
+  setTimeout(tryWrapFns, 300);
+
+  // ── capture video element events ──
   const video = document.getElementById("video");
   if (video){
     ["loadstart","loadedmetadata","canplay","playing","waiting","stalled","error","ended","play","pause","seeking","seeked"].forEach(ev=>{
       video.addEventListener(ev, ()=>{
-        const extra = ev==="error"&&video.error ? " code="+video.error.code+" msg="+(video.error.message||"?")
-          : ev==="loadedmetadata" ? " dur="+(video.duration||0).toFixed(1)+"s" : "";
+        const extra = ev==="error"&&video.error
+          ? " code="+video.error.code+" msg="+(video.error.message||"?") + " src=" + (video.currentSrc || video.src || "?")
+          : ev==="loadedmetadata" ? " dur="+(video.duration||0).toFixed(1)+"s"
+          : ev==="loadstart" ? " src=" + (video.currentSrc || video.src || "?")
+          : "";
         append(ev==="error"?"err":"info","video: "+ev+extra);
       });
     });
